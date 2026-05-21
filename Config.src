@@ -1,0 +1,5 @@
+menu "Busybox PACMAN"
+
+INSERT
+
+endmenu
