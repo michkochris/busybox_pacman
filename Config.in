@@ -7,7 +7,7 @@ config PACMAN
 	select TAR
 	select WGET
 	help
-	pacman is a package manager for Arch Linux and its derivatives.
-	This implementation is a lightweight frontend for BusyBox.
+	  pacman is a package manager for Arch Linux and its derivatives.
+	  This implementation is a lightweight frontend for BusyBox.
 
 endmenu
