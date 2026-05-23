@@ -79,6 +79,7 @@ typedef struct pkg_info_t {
     char *filename;
     llist_t *depends;
     llist_t *provides;
+    llist_t *groups;
     unsigned long csize;
     unsigned long isize;
     char *repo_name;
@@ -106,6 +107,7 @@ struct globals {
     llist_t *available_pkgs;
     llist_t *installed_pkgs;
     char *current_repo_name;
+    char bb_path[1024];
 } FIX_ALIASING;
 #define G (*(struct globals*)bb_common_bufsiz1)
 
@@ -353,6 +355,8 @@ static void parse_alpm_metadata_block(pkg_info_t *pkg, const char *block_data)
                 llist_add_to(&pkg->depends, xstrdup(line));
             } else if (strcmp(current_key, "PROVIDES") == 0) {
                 llist_add_to(&pkg->provides, xstrdup(line));
+            } else if (strcmp(current_key, "GROUPS") == 0) {
+                llist_add_to(&pkg->groups, xstrdup(line));
             } else if (strcmp(current_key, "CSIZE") == 0) {
                 pkg->csize = atol(line);
             } else if (strcmp(current_key, "ISIZE") == 0) {
@@ -453,7 +457,6 @@ static int download_file(const char *url, const char *dest)
 {
     char *cmd;
     int rc;
-    char bb_path[1024];
 
     /* 1. Try system wget silently */
     cmd = xasprintf("wget -q -O %s \"%s\" 2>/dev/null", dest, url);
@@ -462,11 +465,8 @@ static int download_file(const char *url, const char *dest)
 
     if (rc == 0) return 0; /* System tool succeeded! */
 
-    /* 2. Resolve our true executable path BEFORE the shell gets involved */
-    get_bb_exe(bb_path, sizeof(bb_path));
-
-    /* 3. Fallback using our exact binary path */
-    cmd = xasprintf("%s wget -q -O %s \"%s\"", bb_path, dest, url);
+    /* 2. Fallback using our exact binary path */
+    cmd = xasprintf("%s wget -q -O %s \"%s\"", G.bb_path, dest, url);
     rc = system(cmd);
     free(cmd);
 
@@ -480,7 +480,6 @@ static int unzstd_file(const char *src, const char *dest)
 {
     char *cmd;
     int rc;
-    char bb_path[1024];
 
     /* 1. Try system unzstd */
     cmd = xasprintf("unzstd -c \"%s\" > \"%s\" 2>/dev/null", src, dest);
@@ -494,33 +493,32 @@ static int unzstd_file(const char *src, const char *dest)
     free(cmd);
     if (rc == 0) return 0;
 
-    /* 3. Resolve true executable path */
-    get_bb_exe(bb_path, sizeof(bb_path));
-
-    /* 4. Fallback to internal unzstd applet */
-    cmd = xasprintf("%s unzstd -c \"%s\" > \"%s\" 2>/dev/null", bb_path, src, dest);
+    /* 3. Fallback to internal unzstd applet */
+    cmd = xasprintf("%s unzstd -c \"%s\" > \"%s\" 2>/dev/null", G.bb_path, src, dest);
     rc = system(cmd);
     free(cmd);
     if (rc == 0) return 0;
 
-    /* 5. Fallback to internal zstd applet */
-    cmd = xasprintf("%s zstd -dc \"%s\" > \"%s\" 2>/dev/null", bb_path, src, dest);
+    /* 4. Fallback to internal zstd applet */
+    cmd = xasprintf("%s zstd -dc \"%s\" > \"%s\" 2>/dev/null", G.bb_path, src, dest);
     rc = system(cmd);
     free(cmd);
     if (rc == 0) return 0;
 
-    /* 6. ULTIMATE FALLBACK: Use internal libbb decompression (Seamless support)
+    /* 5. ULTIMATE FALLBACK: Use internal libbb decompression (Seamless support)
      * This works if the library has Zstd support even if the applet is disabled. */
-    int src_fd = open_zipped(src, 0);
-    if (src_fd >= 0) {
-        int dest_fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (dest_fd >= 0) {
-            bb_copyfd_eof(src_fd, dest_fd);
-            close(dest_fd);
+    {
+        int src_fd = open_zipped(src, 0);
+        if (src_fd >= 0) {
+            int dest_fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (dest_fd >= 0) {
+                bb_copyfd_eof(src_fd, dest_fd);
+                close(dest_fd);
+                close(src_fd);
+                return 0;
+            }
             close(src_fd);
-            return 0;
         }
-        close(src_fd);
     }
 
     unlink(dest);
@@ -532,7 +530,6 @@ static int tar_file(const char *dest_dir, const char *tarball, const char *optio
 {
     char *cmd;
     int rc;
-    char bb_path[1024];
 
     /* 1. Try system tar silently. Use -a for auto-decompression fallback. */
     cmd = xasprintf("tar -C \"%s\" %s -xaf \"%s\" %s 2>/dev/null",
@@ -542,12 +539,9 @@ static int tar_file(const char *dest_dir, const char *tarball, const char *optio
 
     if (rc == 0) return 0;
 
-    /* 2. Resolve true executable path */
-    get_bb_exe(bb_path, sizeof(bb_path));
-
-    /* 3. Fallback to internal tar */
+    /* 2. Fallback to internal tar */
     cmd = xasprintf("%s tar -C \"%s\" %s -xaf \"%s\" %s",
-                    bb_path, dest_dir, options ? options : "", tarball, files ? files : "");
+                    G.bb_path, dest_dir, options ? options : "", tarball, files ? files : "");
     rc = system(cmd);
     free(cmd);
 
@@ -561,7 +555,6 @@ static int tar_list(const char *tarball, const char *dest_file, const char *opti
 {
     char *cmd;
     int rc;
-    char bb_path[1024];
 
     /* 1. Try system tar silently */
     cmd = xasprintf("tar %s -tf \"%s\" %s >> \"%s\" 2>/dev/null",
@@ -571,12 +564,9 @@ static int tar_list(const char *tarball, const char *dest_file, const char *opti
 
     if (rc == 0) return 0;
 
-    /* 2. Resolve true executable path */
-    get_bb_exe(bb_path, sizeof(bb_path));
-
-    /* 3. Fallback to internal tar */
+    /* 2. Fallback to internal tar */
     cmd = xasprintf("%s tar %s -tf \"%s\" %s >> \"%s\"",
-                    bb_path, options ? options : "", tarball, files ? files : "", dest_file);
+                    G.bb_path, options ? options : "", tarball, files ? files : "", dest_file);
     rc = system(cmd);
     free(cmd);
 
@@ -619,30 +609,17 @@ static pacman_state_t do_sync_db(void)
 
 static pacman_state_t do_parse_db(void)
 {
-    DIR *dir;
-    struct dirent *entry;
-    char *sync_path;
+    llist_t *curr_repo = G.repos;
+    char *sync_path = xasprintf("%s/sync", G.dbpath);
 
-    sync_path = xasprintf("%s/sync", G.dbpath);
+    while (curr_repo) {
+        pacman_repo_t *repo = (pacman_repo_t*)curr_repo->data;
+        char *db_file = xasprintf("%s/%s.db", sync_path, repo->name);
 
-    dir = opendir(sync_path);
-    if (!dir) {
-        free(sync_path);
-        return PACMAN_STATE_FATAL;
-    }
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, ".db")) {
-            char *repo_name = xstrdup(entry->d_name);
-            char *dot = strchr(repo_name, '.');
-            char *db_file;
+        if (access(db_file, R_OK) == 0) {
             archive_handle_t *handle;
 
-            if (dot) *dot = '\0';
-
-            G.current_repo_name = repo_name;
-            db_file = xasprintf("%s/%s", sync_path, entry->d_name);
-
+            G.current_repo_name = xstrdup(repo->name);
             handle = init_handle();
             handle->action_data = alpm_db_action_data;
             handle->filter = filter_accept_all;
@@ -653,14 +630,17 @@ static pacman_state_t do_parse_db(void)
                     continue;
                 close(handle->src_fd);
             }
-
             free(handle);
-            free(db_file);
-            free(repo_name);
+            free(G.current_repo_name);
+            G.current_repo_name = NULL;
         }
+        free(db_file);
+        curr_repo = curr_repo->link;
     }
-    closedir(dir);
     free(sync_path);
+
+    /* Reverse the list once in O(N) time so order is preserved */
+    G.available_pkgs = llist_rev(G.available_pkgs);
 
     if (G.opts & OPT_s)
         return PACMAN_STATE_SEARCH;
@@ -696,15 +676,21 @@ static pacman_state_t do_search(void)
 
 static pkg_info_t* find_package(const char *name)
 {
-    llist_t *curr = G.available_pkgs;
+    llist_t *curr;
+
+    /* Pass 1: Exact name match (Respects repo priority via list order) */
+    curr = G.available_pkgs;
     while (curr) {
         pkg_info_t *pkg = (pkg_info_t*)curr->data;
-        llist_t *prov;
-
         if (strcmp(pkg->name, name) == 0) return pkg;
+        curr = curr->link;
+    }
 
-        /* Check if any package provides this name (capabilities/virtual packages) */
-        prov = pkg->provides;
+    /* Pass 2: Provides match (capabilities/virtual packages) */
+    curr = G.available_pkgs;
+    while (curr) {
+        pkg_info_t *pkg = (pkg_info_t*)curr->data;
+        llist_t *prov = pkg->provides;
         while (prov) {
             char *pname = (char*)prov->data;
             if (strcmp(pname, name) == 0) return pkg;
@@ -729,7 +715,18 @@ static pkg_info_t* find_installed_package(const char *name)
     return NULL;
 }
 
-static void resolve_package(const char *name)
+static int check_version_constraint(const char *inst_ver, const char *op, const char *req_ver)
+{
+    int cmp = compare_versions(inst_ver, req_ver);
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0) return cmp == 0;
+    if (strcmp(op, ">=") == 0) return cmp >= 0;
+    if (strcmp(op, "<=") == 0) return cmp <= 0;
+    if (strcmp(op, ">") == 0) return cmp > 0;
+    if (strcmp(op, "<") == 0) return cmp < 0;
+    return 0;
+}
+
+static void resolve_package(const char *name, int force_install)
 {
     pkg_info_t *pkg = find_package(name);
     pkg_info_t *installed;
@@ -741,35 +738,115 @@ static void resolve_package(const char *name)
     }
     if (pkg->state == 2) return;
 
-    /* Check if already installed. If we are NOT doing a system upgrade (-u),
-     * or if the installed version is newer/equal, assume it satisfies the dependency. */
     installed = find_installed_package(pkg->name);
-    if (installed && (!(G.opts & OPT_u) || compare_versions(pkg->version, installed->version) <= 0)) {
-        /* Check if it's explicitly in target_pkgs (user wants to force/reinstall) */
-        llist_t *t = G.target_pkgs;
-        int forced = 0;
-        while (t) {
-            if (strcmp((char*)t->data, pkg->name) == 0) {
-                forced = 1;
-                break;
-            }
-            t = t->link;
+
+    /* If it's already installed, we skip downloading it UNLESS:
+     * 1. It was explicitly requested (force_install == 1)
+     * 2. The user passed --reinstall
+     * 3. We are doing a full system upgrade (-u) and a newer version exists */
+    if (installed && !force_install && !(G.opts & OPT_reinstall)) {
+        if (!(G.opts & OPT_u) || compare_versions(pkg->version, installed->version) <= 0) {
+            return;
         }
-        if (!forced && !(G.opts & OPT_reinstall)) return;
     }
 
-    pkg->state = 2;
+    pkg->state = 2; /* Mark as resolved to prevent infinite loops */
+
     dep = pkg->depends;
     while (dep) {
-        char *dep_name = xstrdup((char*)dep->data);
-        char *p = strpbrk(dep_name, "<=>");
-        if (p) *p = '\0';
+        char *dep_str = (char*)dep->data;
+        char *dep_name = xstrdup(dep_str);
+        char *op = strpbrk(dep_name, "<=>");
+        char *req_ver = NULL;
+        char op_str[3] = {0};
 
-        resolve_package(dep_name);
+        /* Parse the exact operator and target version */
+        if (op) {
+            if (op[1] == '=' || op[1] == '>' || op[1] == '<') {
+                op_str[0] = op[0]; op_str[1] = op[1]; req_ver = op + 2;
+            } else {
+                op_str[0] = op[0]; req_ver = op + 1;
+            }
+            *op = '\0'; /* Null-terminate the dependency name */
+        }
+
+        /* Check if the installed system already satisfies this constraint */
+        pkg_info_t *inst = find_installed_package(dep_name);
+        int satisfied = 0;
+
+        if (inst) {
+            if (!op) {
+                satisfied = 1; /* Installed, and no specific version required */
+            } else {
+                satisfied = check_version_constraint(inst->version, op_str, req_ver);
+            }
+        }
+
+        /* If the local system DOES NOT satisfy the constraint, force the upgrade */
+        if (!satisfied) {
+            resolve_package(dep_name, 1);
+        }
+
         free(dep_name);
         dep = dep->link;
     }
     llist_add_to_end(&G.resolved_pkgs, pkg);
+}
+
+static void expand_groups(void)
+{
+    llist_t *new_targets = NULL;
+    llist_t *curr = G.target_pkgs;
+
+    while (curr) {
+        char *target = (char*)curr->data;
+        int found = 0;
+
+        /* Check if it's a real package first */
+        if (find_package(target)) {
+            llist_add_to_end(&new_targets, xstrdup(target));
+            found = 1;
+        } else {
+            /* Check if it's a group name */
+            llist_t *pkgs = G.available_pkgs;
+            while (pkgs) {
+                pkg_info_t *pkg = (pkg_info_t*)pkgs->data;
+                llist_t *g = pkg->groups;
+                while (g) {
+                    if (strcmp((char*)g->data, target) == 0) {
+                        /* Check for duplicates in new_targets */
+                        llist_t *t = new_targets;
+                        int exists = 0;
+                        while (t) {
+                            if (strcmp((char*)t->data, pkg->name) == 0) {
+                                exists = 1;
+                                break;
+                            }
+                            t = t->link;
+                        }
+                        if (!exists)
+                            llist_add_to_end(&new_targets, xstrdup(pkg->name));
+                        found = 1;
+                        break;
+                    }
+                    g = g->link;
+                }
+                pkgs = pkgs->link;
+            }
+        }
+
+        if (!found) {
+            /* Keep it so resolve_package can report error */
+            llist_add_to_end(&new_targets, xstrdup(target));
+        }
+        curr = curr->link;
+    }
+
+    /* Free old list - simple way in busybox */
+    while (G.target_pkgs) {
+        free(llist_pop(&G.target_pkgs));
+    }
+    G.target_pkgs = new_targets;
 }
 
 static pacman_state_t do_resolve_deps(void)
@@ -780,6 +857,7 @@ static pacman_state_t do_resolve_deps(void)
     int count;
 
     load_local_db();
+    expand_groups();
 
     if (G.opts & OPT_u) {
         printf(":: %sStarting full system upgrade...%s\n", CLR_BOLD, CLR_RESET);
@@ -802,7 +880,7 @@ static pacman_state_t do_resolve_deps(void)
 
     printf(":: %sResolving dependencies...%s\n", CLR_BOLD, CLR_RESET);
     while (curr) {
-        resolve_package((char*)curr->data);
+        resolve_package((char*)curr->data, 1); /* Pass 1 to force resolution */
         curr = curr->link;
     }
 
@@ -848,22 +926,35 @@ static pacman_repo_t* find_repo(const char *name)
 static pacman_state_t do_download(void)
 {
     llist_t *curr = G.resolved_pkgs;
+    int total = llist_count(G.resolved_pkgs);
+    int i = 1;
+
     printf(":: %sRetrieving packages...%s\n", CLR_BOLD, CLR_RESET);
     bb_make_directory(G.cachedir, 0755, FILEUTILS_RECUR);
 
     while (curr) {
         pkg_info_t *pkg = (pkg_info_t*)curr->data;
         pacman_repo_t *repo = find_repo(pkg->repo_name);
+
+        if (!pkg->filename) {
+            bb_error_msg("corrupt database: no filename specified for %s", pkg->name);
+            return PACMAN_STATE_FATAL;
+        }
+
         if (repo && repo->servers) {
             char *url = substitute_vars((char*)repo->servers->data, repo->name);
-            char *pkg_url = xasprintf("%s/%s", url, pkg->filename ? pkg->filename : "");
-            char *dest = xasprintf("%s/%s", G.cachedir, pkg->filename ? pkg->filename : "");
+            char *pkg_url = xasprintf("%s/%s", url, pkg->filename);
+            char *dest = xasprintf("%s/%s", G.cachedir, pkg->filename);
 
-            printf(" %s%s-%s%s downloading...\n", CLR_GREEN, pkg->name, pkg->version, CLR_RESET);
-            if (download_file(pkg_url, dest) != 0) {
-                bb_error_msg("failed to download %s", pkg->filename);
-                free(dest); free(pkg_url); free(url);
-                return PACMAN_STATE_FATAL;
+            if (access(dest, F_OK) == 0) {
+                printf(" Get:%d %s%s-%s%s (cached)\n", i++, CLR_GREEN, pkg->name, pkg->version, CLR_RESET);
+            } else {
+                printf(" Get:%d %s%s-%s%s downloading...\n", i++, CLR_GREEN, pkg->name, pkg->version, CLR_RESET);
+                if (download_file(pkg_url, dest) != 0) {
+                    bb_error_msg("failed to download %s", pkg->filename);
+                    free(dest); free(pkg_url); free(url);
+                    return PACMAN_STATE_FATAL;
+                }
             }
 
             free(dest);
@@ -899,6 +990,19 @@ static pacman_state_t do_commit(void)
         pkg_file = xasprintf("%s/%s", G.cachedir, pkg->filename);
         local_db_dir = xasprintf("%s/local/%s-%s", G.dbpath, pkg->name, pkg->version);
 
+        /* 0. Cleanup old version metadata to prevent official pacman "duplicated database entry" errors */
+        {
+            pkg_info_t *old_inst = find_installed_package(pkg->name);
+            if (old_inst && strcmp(old_inst->version, pkg->version) != 0) {
+                char *old_db_dir = xasprintf("%s/local/%s-%s", G.dbpath, old_inst->name, old_inst->version);
+                char *rm_c;
+                rm_c = xasprintf("rm -rf \"%s\" 2>/dev/null || %s rm -rf \"%s\"", old_db_dir, G.bb_path, old_db_dir);
+                system(rm_c);
+                free(rm_c);
+                free(old_db_dir);
+            }
+        }
+
         printf("(%d/%d) %sInstalling %s-%s...%s\n", i++, total, CLR_GREEN, pkg->name, pkg->version, CLR_RESET);
 
         if (strstr(pkg_file, ".zst")) {
@@ -923,11 +1027,10 @@ static pacman_state_t do_commit(void)
          * .PKGINFO is guaranteed to exist. Others are optional and we try them silently. */
         tar_file(local_db_dir, work_tar, NULL, ".PKGINFO");
         {
-            char b_path[1024];
-            get_bb_exe(b_path, sizeof(b_path));
-            char *meta_cmd = xasprintf("tar -C \"%s\" -xf \"%s\" .INSTALL .MTREE .CHANGELOG 2>/dev/null || "
+            char *meta_cmd;
+            meta_cmd = xasprintf("tar -C \"%s\" -xf \"%s\" .INSTALL .MTREE .CHANGELOG 2>/dev/null || "
                                        "%s tar -C \"%s\" -xf \"%s\" .INSTALL .MTREE .CHANGELOG 2>/dev/null || true",
-                                       local_db_dir, work_tar, b_path, local_db_dir, work_tar);
+                                       local_db_dir, work_tar, G.bb_path, local_db_dir, work_tar);
             system(meta_cmd);
             free(meta_cmd);
         }
@@ -985,15 +1088,24 @@ static pacman_state_t do_commit(void)
 
         /* 3. Execute .INSTALL script if it exists */
         install_script = xasprintf("%s/.INSTALL", local_db_dir);
-        if (access(install_script, X_OK) == 0) {
+        if (access(install_script, R_OK) == 0) {
             char *new_inst = xasprintf("%s/install", local_db_dir);
-            rename(install_script, new_inst);
-            free(install_script);
-            install_script = new_inst;
+            char *script_path_in_chroot = new_inst + strlen(G.root);
+            pkg_info_t *old_inst = find_installed_package(pkg->name);
 
-            cmd = xasprintf("chroot %s %s post_install %s", G.root, install_script + strlen(G.root), pkg->version);
+            rename(install_script, new_inst);
+            if (script_path_in_chroot[0] != '/') script_path_in_chroot--; /* Ensure leading slash */
+
+            if (old_inst) {
+                printf(" :: Running post-upgrade script for %s...\n", pkg->name);
+                cmd = xasprintf("chroot %s sh -c \". %s; post_upgrade %s %s\"", G.root, script_path_in_chroot, pkg->version, old_inst->version);
+            } else {
+                printf(" :: Running post-install script for %s...\n", pkg->name);
+                cmd = xasprintf("chroot %s sh -c \". %s; post_install %s\"", G.root, script_path_in_chroot, pkg->version);
+            }
             system(cmd);
             free(cmd);
+            free(new_inst);
         }
         free(install_script);
 
@@ -1007,10 +1119,7 @@ static pacman_state_t do_commit(void)
     /* 4. Update linker cache */
     printf(":: Updating linker cache...\n");
     {
-        char bb_path[1024];
-        get_bb_exe(bb_path, sizeof(bb_path));
-
-        cmd = xasprintf("ldconfig 2>/dev/null || %s ldconfig", bb_path);
+        cmd = xasprintf("ldconfig 2>/dev/null || %s ldconfig", G.bb_path);
         system(cmd);
         free(cmd);
     }
@@ -1038,8 +1147,16 @@ static pacman_state_t do_info(void)
             printf("Architecture    : %s\n", G.arch);
             printf("URL             : %s\n", pkg->url ? pkg->url : "None");
             printf("Licenses        : %s\n", pkg->license ? pkg->license : "None");
-            printf("Groups          : None\n");
-            printf("Provides        : ");
+            printf("Groups          : ");
+            {
+                llist_t *g = pkg->groups;
+                if (!g) printf("None");
+                while (g) {
+                    printf("%s ", (char*)g->data);
+                    g = g->link;
+                }
+            }
+            printf("\nProvides        : ");
             p = pkg->provides;
             while (p) {
                 printf("%s ", (char*)p->data);
@@ -1084,12 +1201,12 @@ static pacman_state_t do_remove(void)
                 char *line;
                 while ((line = xmalloc_fgetline(f)) != NULL) {
                     char *path;
+                    struct stat st;
                     if (line[0] == '%') {
                         free(line);
                         continue;
                     }
                     path = xasprintf("%s/%s", G.root, line);
-                    struct stat st;
                     if (lstat(path, &st) == 0 && !S_ISDIR(st.st_mode)) {
                         unlink(path);
                     }
@@ -1102,9 +1219,7 @@ static pacman_state_t do_remove(void)
             }
 
             {
-                char bb_path[1024];
-                get_bb_exe(bb_path, sizeof(bb_path));
-                rm_cmd = xasprintf("rm -rf %s 2>/dev/null || %s rm -rf %s", local_db_dir, bb_path, local_db_dir);
+                rm_cmd = xasprintf("rm -rf %s 2>/dev/null || %s rm -rf %s", local_db_dir, G.bb_path, local_db_dir);
             }
             system(rm_cmd);
             free(rm_cmd);
@@ -1162,9 +1277,8 @@ static pacman_state_t do_verify(void)
             if (G.opts & OPT_md5check) {
                 char *md5_file = xasprintf("%s/md5sums", local_db_dir);
                 if (access(md5_file, R_OK) == 0) {
-                    char bb_path[1024];
-                    get_bb_exe(bb_path, sizeof(bb_path));
-                    char *cmd = xasprintf("md5sum -c %s 2>/dev/null || %s md5sum -c %s", md5_file, bb_path, md5_file);
+                    char *cmd;
+                    cmd = xasprintf("md5sum -c %s 2>/dev/null || %s md5sum -c %s", md5_file, G.bb_path, md5_file);
                     system(cmd);
                     free(cmd);
                 } else {
@@ -1258,6 +1372,7 @@ int pacman_main(int argc, char **argv)
     setup_common_bufsiz();
     memset(&G, 0, sizeof(G));
     G.current_state = PACMAN_STATE_INIT;
+    get_bb_exe(G.bb_path, sizeof(G.bb_path));
 
     /* Handle md5check as a subcommand if present */
     if (argc > 1 && strcmp(argv[1], "md5check") == 0) {

@@ -1,0 +1,103 @@
+When you installed gcc, it pulled in the newest compiler. That compiler explicitly requested gcc-libs>=16.x. Because my previous fix blinded the applet to the >=16.x string, your applet looked at your local system, saw the old gcc-libs v15, and said, "Hey, it's installed! Skip it!"
+
+To fix this forever, your applet must parse the math operators (>=, =, <=) out of the dependency string and mathematically compare the requested version against the installed version.
+
+Here is how to make your applet fully constraint-aware.
+
+1. The Version Math Helper
+Add this function right above resolve_package(). It translates the string operators into mathematical comparisons using your existing compare_versions() logic.
+
+C
+static int check_version_constraint(const char *inst_ver, const char *op, const char *req_ver)
+{
+    int cmp = compare_versions(inst_ver, req_ver);
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0) return cmp == 0;
+    if (strcmp(op, ">=") == 0) return cmp >= 0;
+    if (strcmp(op, "<=") == 0) return cmp <= 0;
+    if (strcmp(op, ">") == 0) return cmp > 0;
+    if (strcmp(op, "<") == 0) return cmp < 0;
+    return 0;
+}
+2. The Constraint-Aware Resolver
+Replace your entire resolve_package() function with this one. Notice that I added a force_install integer to the signature. This lets the FSM distinguish between a package the user explicitly requested versus a package that is just a dependency tag-along.
+
+C
+static void resolve_package(const char *name, int force_install)
+{
+    pkg_info_t *pkg = find_package(name);
+    pkg_info_t *installed;
+    llist_t *dep;
+
+    if (!pkg) {
+        bb_error_msg("Package not found: %s", name);
+        return;
+    }
+    if (pkg->state == 2) return;
+
+    installed = find_installed_package(pkg->name);
+    
+    /* If it's already installed, we skip downloading it UNLESS:
+     * 1. It was explicitly requested (force_install == 1)
+     * 2. The user passed --reinstall
+     * 3. We are doing a full system upgrade (-u) and a newer version exists */
+    if (installed && !force_install && !(G.opts & OPT_reinstall)) {
+        if (!(G.opts & OPT_u) || compare_versions(pkg->version, installed->version) <= 0) {
+            return;
+        }
+    }
+
+    pkg->state = 2; /* Mark as resolved to prevent infinite loops */
+    
+    dep = pkg->depends;
+    while (dep) {
+        char *dep_str = (char*)dep->data;
+        char *dep_name = xstrdup(dep_str);
+        char *op = strpbrk(dep_name, "<=>");
+        char *req_ver = NULL;
+        char op_str[3] = {0};
+
+        /* Parse the exact operator and target version */
+        if (op) {
+            if (op[1] == '=' || op[1] == '>' || op[1] == '<') {
+                op_str[0] = op[0]; op_str[1] = op[1]; req_ver = op + 2;
+            } else {
+                op_str[0] = op[0]; req_ver = op + 1;
+            }
+            *op = '\0'; /* Null-terminate the dependency name */
+        }
+
+        /* Check if the installed system already satisfies this constraint */
+        pkg_info_t *inst = find_installed_package(dep_name);
+        int satisfied = 0;
+
+        if (inst) {
+            if (!op) {
+                satisfied = 1; /* Installed, and no specific version required */
+            } else {
+                satisfied = check_version_constraint(inst->version, op_str, req_ver);
+            }
+        }
+
+        /* If the local system DOES NOT satisfy the constraint, force the upgrade */
+        if (!satisfied) {
+            resolve_package(dep_name, 1);
+        }
+
+        free(dep_name);
+        dep = dep->link;
+    }
+    
+    llist_add_to_end(&G.resolved_pkgs, pkg);
+}
+3. Update the Target Loop
+Because we changed the signature of resolve_package() to accept the force_install flag, you need to update the call inside do_resolve_deps().
+
+Scroll down to do_resolve_deps() and change the while(curr) loop to explicitly pass a 1 (since anything in the target queue was requested by the user):
+
+C
+    printf(":: %sResolving dependencies...%s\n", CLR_BOLD, CLR_RESET);
+    while (curr) {
+        resolve_package((char*)curr->data, 1); /* Pass 1 to force resolution */
+        curr = curr->link;
+    }
+With this logic, if you run ./busybox pacman -S tree, it will see that tree requires glibc>=2.34. It will look at your installed glibc (2.43), mathematically confirm that 2.43 is greater than 2.34, and skip it. But if you install gcc, it will see your installed gcc-libs doesn't satisfy the >=16.x requirement, and it will safely pull the required library in!
