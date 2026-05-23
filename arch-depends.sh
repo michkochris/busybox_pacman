@@ -8,7 +8,7 @@ sudo pacman -Sy
 
 echo "Installing build dependencies..."
 # Core build tools (base-devel equivalent + extras)
-sudo pacman -S --needed \
+sudo pacman -S \
     binutils \
     bison \
     flex \

@@ -2,12 +2,16 @@
 menu "Busybox PACMAN"
 
 config PACMAN
-	bool "pacman (11 kb)"
-	default y
-	select TAR
-	select WGET
-	help
-	  pacman is a package manager for Arch Linux and its derivatives.
-	  This implementation is a lightweight frontend for BusyBox.
+   bool "pacman (11 kb)"
+   default y
+   select TAR
+   select WGET
+   select MD5SUM
+   select SHA256SUM
+   select AWK
+   select GUNZIP
+   help
+     pacman is a package manager for Arch Linux and its derivatives.
+     This implementation is a lightweight frontend for BusyBox.
 
 endmenu
